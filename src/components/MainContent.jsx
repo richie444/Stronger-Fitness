@@ -1,6 +1,6 @@
-import { useMemo, useState } from "react";
-import { classCategories, classes, memberships, trainers } from "../data/siteData.js";
+import { useEffect, useMemo, useState } from "react";
 import ClassCard from "./ClassCard.jsx";
+import { apiRequest } from "../lib/api.js";
 
 const benefits = [
   { icon: "↗", title: "Coaching that clicks", copy: "Real guidance from people who care about your progress, not just your reps." },
@@ -21,6 +21,38 @@ function SectionHeading({ eyebrow, title, copy, centered = false }) {
 export default function MainContent() {
   const [activeCategory, setActiveCategory] = useState("All classes");
   const [bookings, setBookings] = useState({});
+  const [classes, setClasses] = useState([]);
+  const [trainers, setTrainers] = useState([]);
+  const [memberships, setMemberships] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
+
+  useEffect(() => {
+    let active = true;
+    Promise.all([
+      apiRequest("/api/classes"),
+      apiRequest("/api/trainers"),
+      apiRequest("/api/memberships"),
+    ])
+      .then(([classData, trainerData, membershipData]) => {
+        if (!active) return;
+        setClasses(classData);
+        setTrainers(trainerData);
+        setMemberships(membershipData);
+      })
+      .catch((error) => {
+        if (active) setLoadError(error.message);
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => { active = false; };
+  }, []);
+
+  const classCategories = useMemo(
+    () => ["All classes", ...new Set(classes.map((session) => session.category))],
+    [classes],
+  );
   const visibleClasses = useMemo(
     () => activeCategory === "All classes" ? classes : classes.filter((session) => session.category === activeCategory),
     [activeCategory],
@@ -67,7 +99,9 @@ export default function MainContent() {
               <ClassCard key={session.id} session={session} quantity={bookings[session.id] ?? 0} onQuantityChange={(quantity) => updateBooking(session.id, quantity)} />
             ))}
           </div>
-          {visibleClasses.length === 0 && <p className="rounded-2xl bg-white p-8 text-center text-muted">No classes in this category just yet.</p>}
+          {loading && <p className="rounded-2xl bg-white p-8 text-center text-muted" role="status">Loading classes from the studio…</p>}
+          {!loading && loadError && <p className="rounded-2xl bg-red-50 p-8 text-center text-red-800" role="alert">Couldn’t load the studio schedule: {loadError}. Check the API and database connection, then refresh.</p>}
+          {!loading && !loadError && visibleClasses.length === 0 && <p className="rounded-2xl bg-white p-8 text-center text-muted">No classes in this category just yet.</p>}
         </div>
       </section>
 

@@ -18,7 +18,7 @@ function SectionHeading({ eyebrow, title, copy, centered = false }) {
   );
 }
 
-export default function MainContent() {
+export default function MainContent({ user, onAuthRequest }) {
   const [activeCategory, setActiveCategory] = useState("All classes");
   const [bookings, setBookings] = useState({});
   const [classes, setClasses] = useState([]);
@@ -26,6 +26,8 @@ export default function MainContent() {
   const [memberships, setMemberships] = useState([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
+  const [checkoutBusy, setCheckoutBusy] = useState("");
+  const [checkoutError, setCheckoutError] = useState("");
 
   useEffect(() => {
     let active = true;
@@ -61,6 +63,27 @@ export default function MainContent() {
 
   function updateBooking(classId, quantity) {
     setBookings((current) => ({ ...current, [classId]: quantity }));
+  }
+
+  async function startCheckout(plan) {
+    setCheckoutError("");
+    if (!user) {
+      setCheckoutError("Please sign in before choosing a membership.");
+      onAuthRequest();
+      return;
+    }
+
+    setCheckoutBusy(plan.tier);
+    try {
+      const result = await apiRequest("/api/checkout", {
+        method: "POST",
+        body: JSON.stringify({ membershipId: plan.id }),
+      });
+      window.location.assign(result.url);
+    } catch (error) {
+      setCheckoutError(error.message);
+      setCheckoutBusy("");
+    }
   }
 
   return (
@@ -122,6 +145,7 @@ export default function MainContent() {
       <section id="pricing" className="scroll-mt-24 bg-forest py-16 text-white sm:py-20 lg:py-24">
         <div className="mx-auto w-full max-w-7xl px-5 sm:px-8 lg:px-10">
           <SectionHeading eyebrow="Memberships" title="Your next chapter starts here." copy="Simple plans for every stage of your journey." />
+          {checkoutError && <p className="mb-6 rounded-2xl bg-white/10 p-4 text-sm text-white" role="alert">{checkoutError}</p>}
           <div className="grid gap-4 md:grid-cols-3 md:gap-5">
             {memberships.map((plan) => (
               <article key={plan.tier} className={`flex flex-col rounded-3xl p-6 sm:p-8 ${plan.featured ? "bg-[#f6f1e9] text-ink shadow-2xl md:-translate-y-2" : "border border-white/15 bg-white/[0.07]"}`}>
@@ -130,7 +154,7 @@ export default function MainContent() {
                 <ul className="mb-8 mt-6 space-y-3 text-sm">
                   {plan.features.map((feature) => <li key={feature} className={`flex gap-2 ${plan.featured ? "text-muted" : "text-white/75"}`}><span className="font-black text-[#f7b158]">✓</span>{feature}</li>)}
                 </ul>
-                <a className={`mt-auto rounded-full px-5 py-3 text-center text-sm font-bold transition ${plan.featured ? "bg-clay text-white hover:bg-[#a95732]" : "border border-white/25 text-white hover:bg-white hover:text-forest"}`} href="#contact">{plan.featured ? "Most popular — join us" : "Choose plan"}</a>
+                <button className={`mt-auto rounded-full px-5 py-3 text-center text-sm font-bold transition disabled:cursor-wait disabled:opacity-60 ${plan.featured ? "bg-clay text-white hover:bg-[#a95732]" : "border border-white/25 text-white hover:bg-white hover:text-forest"}`} type="button" onClick={() => startCheckout(plan)} disabled={Boolean(checkoutBusy)}>{checkoutBusy === plan.tier ? "Opening secure checkout…" : plan.featured ? "Join with Studio" : `Choose ${plan.tier}`}</button>
               </article>
             ))}
           </div>

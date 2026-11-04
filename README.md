@@ -9,7 +9,7 @@ A responsive fitness studio website built with React, Vite, Tailwind CSS, Expres
 - `src/lib/api.js` — shared browser helper for API requests and cookies.
 - `src/data/siteData.js` — starter data used by the repeatable database seed script.
 - `server/index.js` — Express API, authentication endpoints, and session handling.
-- `server/schema.sql` — PostgreSQL tables for users, classes, trainers, and memberships.
+- `server/schema.sql` — PostgreSQL tables for users, classes, trainers, memberships, orders, and order items.
 - `server/seed.js` — inserts or updates the starter site data in PostgreSQL.
 
 ## Local development
@@ -40,6 +40,20 @@ The API creates the tables at startup. The seed command is safe to run more than
 - `POST /api/auth/signup`, `POST /api/auth/login` — create an account or start a session.
 - `GET /api/auth/me` — read the current session.
 - `POST /api/auth/logout` — end the current session.
+- `POST /api/checkout` — signed-in users start a monthly Stripe test subscription for a database-priced membership.
+- `POST /api/webhooks/stripe` — verifies Stripe's signature and is the only route that marks orders paid.
+- `GET /api/orders/:orderId?session_id=...` — signed-in order owner reads payment status and items.
+
+## Stripe test checkout
+
+1. In Stripe Dashboard, switch to **Test mode** and copy a test secret key (`sk_test_...`) into `STRIPE_SECRET_KEY` in your ignored local `.env`. Do not use a live key.
+2. Install and authenticate the Stripe CLI, then run `npm run stripe:listen`. Copy the printed `whsec_...` signing secret into `STRIPE_WEBHOOK_SECRET` in `.env`, then restart the API.
+3. Keep `STRIPE_CURRENCY=usd` (or use another currency enabled in your Stripe test account). Restart `npm run dev`, sign in to the site, and select a membership. The server fetches its price from PostgreSQL; the browser sends only the membership ID.
+4. Complete Stripe Checkout using test card `4242 4242 4242 4242`, any future expiry date, and any CVC. The success screen checks your order several times while the verified webhook updates it.
+
+The orders table records the user, status, total in the smallest currency unit (cents for USD), Stripe Checkout session, and paid timestamp. Order items keep a membership name and unit-price snapshot so the purchase remains understandable if a plan later changes. A new database receives both order tables when the API starts; existing databases get them through the same `CREATE TABLE IF NOT EXISTS` schema setup.
+
+For deployment, set `STRIPE_SECRET_KEY` to a test-mode key and configure `STRIPE_WEBHOOK_SECRET` from a Stripe webhook endpoint targeting `https://YOUR-BACKEND.onrender.com/api/webhooks/stripe`. Subscribe at minimum to `checkout.session.completed` (and optionally `checkout.session.async_payment_succeeded`). Keep all Stripe secrets in Render's environment settings, never in the frontend or Git.
 
 ## Deployment (Render + Vercel)
 

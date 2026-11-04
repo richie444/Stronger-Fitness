@@ -1,5 +1,3 @@
-import { useState } from "react";
-import AuthDialog from "./AuthDialog.jsx";
 import { apiRequest } from "../lib/api.js";
 
 const navigation = [
@@ -8,9 +6,7 @@ const navigation = [
   { href: "#pricing", label: "Memberships" },
 ];
 
-export default function Header({ user, onUserChange }) {
-  const [authOpen, setAuthOpen] = useState(false);
-
+export default function Header({ user, onUserChange, onAuthRequest }) {
   async function handleSignOut() {
     try {
       await apiRequest("/api/auth/logout", { method: "POST" });
@@ -40,13 +36,12 @@ export default function Header({ user, onUserChange }) {
             </div>
           ) : (
             <div className="flex items-center gap-3">
-              <button className="px-1 py-2 text-sm font-bold text-ink transition hover:text-clay" type="button" onClick={() => setAuthOpen(true)}>Sign in</button>
-              <button className="rounded-full bg-ink px-5 py-2.5 text-sm font-bold text-white transition hover:bg-forest" type="button" onClick={() => setAuthOpen(true)}>Join now</button>
+              <button className="px-1 py-2 text-sm font-bold text-ink transition hover:text-clay" type="button" onClick={onAuthRequest}>Sign in</button>
+              <button className="rounded-full bg-ink px-5 py-2.5 text-sm font-bold text-white transition hover:bg-forest" type="button" onClick={onAuthRequest}>Join now</button>
             </div>
           )}
         </div>
       </header>
-      {authOpen && <AuthDialog onClose={() => setAuthOpen(false)} onSignedIn={onUserChange} />}
     </>
   );
 }

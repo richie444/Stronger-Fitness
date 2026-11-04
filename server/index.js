@@ -49,17 +49,24 @@ app.post("/api/webhooks/stripe", express.raw({ type: "application/json" }), asyn
           [orderId],
         );
         const order = orderResult.rows[0];
-        if (order && order.stripe_session_id === checkoutSession.id
-          && order.total_amount === checkoutSession.amount_total
-          && order.currency.trim() === checkoutSession.currency) {
+        if (!order || !order.stripe_session_id) {
+          console.warn("Stripe webhook arrived before the checkout session was saved; requesting a retry.", { orderId });
+          return response.status(500).json({ error: "Order is not ready for payment confirmation." });
+        }
+        if (order.stripe_session_id !== checkoutSession.id
+          || order.total_amount !== checkoutSession.amount_total
+          || order.currency.trim() !== checkoutSession.currency) {
+          console.error("Stripe payment did not match the saved order.", { orderId });
+          return response.status(400).json({ error: "Payment does not match the order." });
+        }
+
+        if (order.status === "pending") {
           await pool.query(
             `UPDATE orders
              SET status = 'paid', paid_at = NOW(), stripe_payment_intent_id = $2
              WHERE id = $1 AND status = 'pending'`,
             [order.id, checkoutSession.payment_intent || null],
           );
-        } else {
-          console.error("Stripe payment did not match a pending order.", { orderId });
         }
       } catch (error) {
         console.error("Could not apply Stripe payment webhook:", error.message);

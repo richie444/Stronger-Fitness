@@ -9,6 +9,7 @@
     "dev:server": "node --watch server/index.js",
     "start:server": "node server/index.js",
     "db:seed": "node server/seed.js",
+    "stripe:listen": "stripe listen --forward-to localhost:3001/api/webhooks/stripe",
     "build": "vite build",
     "preview": "vite preview"
   },
@@ -27,6 +28,7 @@
     "postcss": "latest",
     "react": "latest",
     "react-dom": "latest",
+    "stripe": "^23.1.0",
     "tailwindcss": "^3.4.17",
     "vite": "latest"
   },

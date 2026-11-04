@@ -6,6 +6,7 @@ import express from "express";
 import session from "express-session";
 import rateLimit from "express-rate-limit";
 import helmet from "helmet";
+import Stripe from "stripe";
 import { pool, initializeDatabase } from "./db.js";
 
 const app = express();
@@ -13,11 +14,63 @@ const port = Number(process.env.PORT) || 3001;
 const production = process.env.NODE_ENV === "production";
 const clientUrl = process.env.CLIENT_URL;
 const PgSession = connectPgSimple(session);
+const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SECRET_KEY) : null;
 
 if (production) app.set("trust proxy", 1);
 
 app.use(helmet());
 app.use(cors({ origin: clientUrl || "http://localhost:5173", credentials: true }));
+
+app.post("/api/webhooks/stripe", express.raw({ type: "application/json" }), async (request, response) => {
+  if (!stripe || !process.env.STRIPE_WEBHOOK_SECRET) {
+    return response.status(503).json({ error: "Stripe webhook is not configured." });
+  }
+
+  let event;
+  try {
+    const signature = request.headers["stripe-signature"];
+    event = stripe.webhooks.constructEvent(request.body, signature, process.env.STRIPE_WEBHOOK_SECRET);
+  } catch (error) {
+    console.warn("Stripe webhook signature verification failed:", error.message);
+    return response.status(400).send("Invalid Stripe signature.");
+  }
+
+  if (["checkout.session.completed", "checkout.session.async_payment_succeeded"].includes(event.type)) {
+    const checkoutSession = event.data.object;
+    if (checkoutSession.payment_status === "paid") {
+      const orderId = checkoutSession.metadata?.orderId;
+      if (!/^\d+$/.test(orderId || "")) {
+        console.error("Stripe payment webhook is missing a valid order ID.");
+        return response.json({ received: true });
+      }
+      try {
+        const orderResult = await pool.query(
+          "SELECT id, total_amount, currency, stripe_session_id FROM orders WHERE id = $1",
+          [orderId],
+        );
+        const order = orderResult.rows[0];
+        if (order && order.stripe_session_id === checkoutSession.id
+          && order.total_amount === checkoutSession.amount_total
+          && order.currency.trim() === checkoutSession.currency) {
+          await pool.query(
+            `UPDATE orders
+             SET status = 'paid', paid_at = NOW(), stripe_payment_intent_id = $2
+             WHERE id = $1 AND status = 'pending'`,
+            [order.id, checkoutSession.payment_intent || null],
+          );
+        } else {
+          console.error("Stripe payment did not match a pending order.", { orderId });
+        }
+      } catch (error) {
+        console.error("Could not apply Stripe payment webhook:", error.message);
+        return response.status(500).json({ error: "Could not update order." });
+      }
+    }
+  }
+
+  response.json({ received: true });
+});
+
 app.use(express.json({ limit: "10kb" }));
 app.use(session({
   store: new PgSession({ pool, createTableIfMissing: true, tableName: "user_sessions" }),
@@ -34,6 +87,11 @@ app.use(session({
 }));
 
 const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 20, standardHeaders: "draft-8", legacyHeaders: false });
+
+function requireLogin(request, response, next) {
+  if (!request.session.userId) return response.status(401).json({ error: "Sign in before starting checkout." });
+  next();
+}
 
 function cleanUser(row) {
   return { id: row.id, name: row.name, email: row.email };
@@ -77,6 +135,117 @@ app.get("/api/memberships", async (_request, response, next) => {
   try {
     const result = await pool.query("SELECT id, tier, price, features, featured FROM memberships ORDER BY price");
     response.json(result.rows);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/checkout", requireLogin, async (request, response, next) => {
+  if (!stripe || !process.env.STRIPE_SECRET_KEY.startsWith("sk_test_")) {
+    return response.status(503).json({ error: "Stripe test mode is not configured on the server yet." });
+  }
+
+  const membershipId = Number(request.body.membershipId);
+  if (!Number.isSafeInteger(membershipId) || membershipId < 1) {
+    return response.status(400).json({ error: "Choose a valid membership plan." });
+  }
+
+  const currency = (process.env.STRIPE_CURRENCY || "usd").toLowerCase();
+  if (!/^[a-z]{3}$/.test(currency)) return response.status(500).json({ error: "Stripe currency is configured incorrectly." });
+
+  const connection = await pool.connect();
+  let order;
+  let membership;
+  try {
+    const membershipResult = await connection.query(
+      "SELECT id, tier, price FROM memberships WHERE id = $1",
+      [membershipId],
+    );
+    membership = membershipResult.rows[0];
+    if (!membership) return response.status(404).json({ error: "That membership plan was not found." });
+
+    const unitPrice = membership.price * 100;
+    await connection.query("BEGIN");
+    const orderResult = await connection.query(
+      "INSERT INTO orders (user_id, total_amount, currency) VALUES ($1, $2, $3) RETURNING id, total_amount",
+      [request.session.userId, unitPrice, currency],
+    );
+    order = orderResult.rows[0];
+    await connection.query(
+      "INSERT INTO order_items (order_id, membership_id, item_name, quantity, unit_price) VALUES ($1, $2, $3, 1, $4)",
+      [order.id, membership.id, membership.tier, unitPrice],
+    );
+    await connection.query("COMMIT");
+  } catch (error) {
+    await connection.query("ROLLBACK").catch(() => {});
+    return next(error);
+  } finally {
+    connection.release();
+  }
+
+  try {
+    const baseUrl = (clientUrl || "http://localhost:5173").replace(/\/$/, "");
+    const checkoutSession = await stripe.checkout.sessions.create({
+      mode: "subscription",
+      client_reference_id: String(request.session.userId),
+      metadata: { orderId: String(order.id), userId: String(request.session.userId) },
+      line_items: [{
+        quantity: 1,
+        price_data: {
+          currency,
+          unit_amount: order.total_amount,
+          product_data: {
+            name: `${membership.tier} Membership`,
+            description: "Monthly Stronger Fitness membership",
+          },
+          recurring: { interval: "month" },
+        },
+      }],
+      success_url: `${baseUrl}/success?orderId=${order.id}&session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${baseUrl}/?checkout=cancelled#pricing`,
+    }, { idempotencyKey: `membership-order-${order.id}` });
+
+    await pool.query("UPDATE orders SET stripe_session_id = $1 WHERE id = $2", [checkoutSession.id, order.id]);
+    response.status(201).json({ url: checkoutSession.url });
+  } catch (error) {
+    await pool.query("UPDATE orders SET status = 'failed' WHERE id = $1 AND status = 'pending'", [order.id]).catch(() => {});
+    next(error);
+  }
+});
+
+app.get("/api/orders/:orderId", requireLogin, async (request, response, next) => {
+  const orderId = request.params.orderId;
+  const checkoutSessionId = request.query.session_id;
+  if (!/^\d+$/.test(orderId) || typeof checkoutSessionId !== "string") {
+    return response.status(400).json({ error: "A valid order and Checkout session are required." });
+  }
+
+  try {
+    const result = await pool.query(
+      "SELECT id, status, total_amount, currency, stripe_session_id, created_at, paid_at FROM orders WHERE id = $1 AND user_id = $2",
+      [orderId, request.session.userId],
+    );
+    const order = result.rows[0];
+    if (!order) return response.status(404).json({ error: "Order not found." });
+    if (order.stripe_session_id !== checkoutSessionId) return response.status(403).json({ error: "Checkout session does not match this order." });
+
+    const itemsResult = await pool.query(
+      "SELECT item_name, quantity, unit_price FROM order_items WHERE order_id = $1 ORDER BY id",
+      [order.id],
+    );
+    response.json({
+      id: order.id,
+      status: order.status,
+      totalAmount: order.total_amount,
+      currency: order.currency.trim(),
+      createdAt: order.created_at,
+      paidAt: order.paid_at,
+      items: itemsResult.rows.map((item) => ({
+        name: item.item_name,
+        quantity: item.quantity,
+        unitPrice: item.unit_price,
+      })),
+    });
   } catch (error) {
     next(error);
   }
